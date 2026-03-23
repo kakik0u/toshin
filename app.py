@@ -5,43 +5,102 @@ from PIL import Image, ImageDraw, ImageFont
 import zipfile
 
 def calculate_panels(height, width, paper_size):
-    paper_sizes = {
+    """height/widthはmm。B5選択時はプリンタ余白を考慮した有効印字領域で枚数を計算。"""
+    paper_sizes_mm = {
         'A4': (210, 297),
         'B5': (176, 250),
         'A3': (297, 420),
     }
-    
-    paper_width, paper_height = paper_sizes[paper_size]
-    
-    panels_vertical = math.ceil(height / paper_height)
-    panels_horizontal = math.ceil(width / paper_width)
-    
+
+    paper_width_mm, paper_height_mm = paper_sizes_mm[paper_size]
+
+    # B5時の余白(cm) -> mm
+    if paper_size == 'B5':
+        left_cm, top_cm, right_cm, bottom_cm = 0.96, 0.84, 0.96, 1.43
+        left_mm, top_mm, right_mm, bottom_mm = (
+            left_cm * 10,
+            top_cm * 10,
+            right_cm * 10,
+            bottom_cm * 10,
+        )
+        eff_width_mm = max(1, paper_width_mm - (left_mm + right_mm))
+        eff_height_mm = max(1, paper_height_mm - (top_mm + bottom_mm))
+    else:
+        eff_width_mm, eff_height_mm = paper_width_mm, paper_height_mm
+
+    panels_vertical = math.ceil(height / eff_height_mm)
+    panels_horizontal = math.ceil(width / eff_width_mm)
+
     total_panels = panels_vertical * panels_horizontal
-    
+
     return total_panels, panels_vertical, panels_horizontal
 
 def split_image(image, height, paper_size):
-    paper_sizes = {
+    """画像を300DPI相当でリサイズし、用紙ごとに分割。
+    B5時はプリンタ余白を考慮した有効印字領域ピクセルで分割・出力する（出力画像に余白は含めない）。
+    """
+    # 用紙サイズ（px, 300DPI想定）
+    paper_sizes_px = {
         'A4': (2480, 3508),  # A4 at 300 DPI
         'B5': (2079, 2953),  # B5 at 300 DPI
         'A3': (3508, 4961),  # A3 at 300 DPI
     }
-    
-    paper_width, paper_height = paper_sizes[paper_size]
-    
+
+    paper_width_px, paper_height_px = paper_sizes_px[paper_size]
+
+    # mm -> px 変換（300DPI）
+    MM_TO_PX = 11.811  # 300 / 25.4
+
+    # 入力画像を指定身長(mm)に合わせてリサイズ
     aspect_ratio = image.width / image.height
-    new_height = int(height * 11.811)  # Convert mm to pixels at 300 DPI
-    new_width = int(new_height * aspect_ratio)
-    image = image.resize((new_width, new_height), Image.LANCZOS)
-    
+    new_height_px = int(height * MM_TO_PX)
+    new_width_px = int(new_height_px * aspect_ratio)
+    image = image.resize((new_width_px, new_height_px), Image.LANCZOS)
+
+    # 分割ステップ（有効印字領域）と出力パネルサイズの決定
+    if paper_size == 'B5':
+        # 余白(cm)
+        left_cm, top_cm, right_cm, bottom_cm = 0, 0.84, 2.4, 1.8
+        # 余白(mm)
+        left_mm, top_mm, right_mm, bottom_mm = (
+            left_cm * 10,
+            top_cm * 10,
+            right_cm * 10,
+            bottom_cm * 10,
+        )
+        # 有効印字領域（px）: 用紙px - 余白px
+        eff_width_px = max(1, int(round((176 - (left_mm + right_mm)) * MM_TO_PX)))
+        eff_height_px = max(1, int(round((250 - (top_mm + bottom_mm)) * MM_TO_PX)))
+
+        step_w, step_h = eff_width_px, eff_height_px
+        out_w, out_h = eff_width_px, eff_height_px  # 出力画像に余白を含めない
+    else:
+        step_w, step_h = paper_width_px, paper_height_px
+        out_w, out_h = paper_width_px, paper_height_px
+
     panels = []
-    for i in range(0, new_height, paper_height):
-        for j in range(0, new_width, paper_width):
-            panel = Image.new('RGB', (paper_width, paper_height), (255, 255, 255))
-            crop = image.crop((j, i, min(j + paper_width, new_width), min(i + paper_height, new_height)))
-            panel.paste(crop, (0, 0), crop)
+    for i in range(0, new_height_px, step_h):
+        for j in range(0, new_width_px, step_w):
+            # 出力は白背景のRGB
+            panel = Image.new('RGB', (out_w, out_h), (255, 255, 255))
+            crop = image.crop((
+                j,
+                i,
+                min(j + step_w, new_width_px),
+                min(i + step_h, new_height_px)
+            ))
+
+            # 透過付きなら白背景にアルファ合成
+            if crop.mode in ("RGBA", "LA") or (crop.mode == "P" and 'transparency' in crop.info):
+                # RGBAに変換してマスクを抽出
+                rgba = crop.convert("RGBA")
+                alpha = rgba.split()[-1]
+                # 白背景に合成
+                panel.paste(rgba, (0, 0), mask=alpha)
+            else:
+                panel.paste(crop, (0, 0))
             panels.append(panel)
-    
+
     return panels
 
 def create_layout_preview(panels_vertical, panels_horizontal, paper_size):
